@@ -7,12 +7,24 @@ export default async function handler(req, res) {
 
   const { username, password } = req.body;
 
-  const response = await fetch('https://api.dnse.com.vn/auth-service/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
-  });
+  if (!username || !password) {
+    return res.status(400).json({ error: 'USERNAME AND PASSWORD REQUIRED' });
+  }
 
-  const data = await response.json();
-  res.status(response.status).json(data);
+  try {
+    const response = await fetch('https://api.dnse.com.vn/auth-service/api/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.DNSE_API_KEY}`
+      },
+      body: JSON.stringify({ username, password })
+    });
+
+    const data = await response.json();
+    res.status(response.status).json(data);
+
+  } catch (err) {
+    res.status(500).json({ error: 'FAILED TO REACH DNSE SERVER' });
+  }
 }
