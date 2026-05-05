@@ -15,8 +15,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'USERNAME AND PASSWORD REQUIRED' });
     }
 
+    console.log('Attempting login for:', username);
+    console.log('API Key present:', !!process.env.DNSE_API_KEY);
+
     const response = await fetch(
-      'https://api.dnse.com.vn/user-service/api/auth',  // ← CORRECT URL
+      'https://api.dnse.com.vn/user-service/api/auth',
       {
         method: 'POST',
         headers: {
@@ -27,13 +30,17 @@ export default async function handler(req, res) {
       }
     );
 
+    console.log('DNSE response status:', response.status);
     const text = await response.text();
+    console.log('DNSE response body:', text);
+
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
 
     return res.status(response.status).json(data);
 
   } catch (err) {
+    console.log('Fetch error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 }
