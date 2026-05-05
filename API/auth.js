@@ -15,24 +15,23 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'USERNAME AND PASSWORD REQUIRED' });
     }
 
-    console.log('Attempting login for:', username);
-    console.log('API Key present:', !!process.env.DNSE_API_KEY);
+    console.log('Attempting DNSE login for:', username);
 
     const response = await fetch(
       'https://api.dnse.com.vn/user-service/api/auth',
       {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.DNSE_API_KEY || ''}`
+          'Content-Type': 'application/json'
+          // No Authorization header for login — DNSE handles this differently
         },
         body: JSON.stringify({ username, password })
       }
     );
 
-    console.log('DNSE response status:', response.status);
+    console.log('DNSE status:', response.status);
     const text = await response.text();
-    console.log('DNSE response body:', text);
+    console.log('DNSE response:', text);
 
     let data;
     try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
@@ -40,7 +39,7 @@ export default async function handler(req, res) {
     return res.status(response.status).json(data);
 
   } catch (err) {
-    console.log('Fetch error:', err.message);
+    console.log('Error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 }
