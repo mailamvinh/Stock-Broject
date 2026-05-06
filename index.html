@@ -527,95 +527,132 @@ function initDemoData() {
 // ══════════════════════════════════════════
 // WEBSOCKET — DNSE REALTIME
 // ══════════════════════════════════════════
-function connectWebSocket() {
-  if (wsConnection) { try { wsConnection.close(); } catch(e){} }
+// ── REALTIME POLLING (REST every 3s) ─────────────────────────────────────
+let pollTimer = null;
+let pollErrors = 0;
 
+async function startRealtimePolling() {
+  setConnStatus('connecting', 'CONNECTING TO DNSE');
+  const symbols = VN_SYMBOLS.map(s => s.sym);
+
+  // Fetch all symbols one by one, staggered to avoid rate limits
+  async function pollAll() {
+    const token = Auth.get();
+    if (!token) { doLogout(); return; }
+
+    let successCount = 0;
+    const t0 = Date.now();
+
+    for (const sym of symbols) {
+      try {
+        const res = await fetch(`/api/quote?symbol=${sym}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (res.status === 401) { doLogout(); return; }
+
+        const raw = await res.json();
+
+        // DNSE quote response fields — try multiple possible structures
+        const price  = raw.lastPrice  || raw.matchedPrice || raw.close || raw.price;
+        const open   = raw.open       || raw.openPrice    || price;
+        const high   = raw.high       || raw.highPrice    || price;
+        const low    = raw.low        || raw.lowPrice     || price;
+        const vol    = raw.totalVolume|| raw.volume       || raw.vol   || 0;
+        const chg    = raw.change     || raw.priceChange  || (price - open) || 0;
+        const chgPct = raw.changePct  || raw.percentChange|| (open ? (chg/open)*100 : 0);
+
+        if (price && stockData[sym]) {
+          stockData[sym].price  = price;
+          stockData[sym].open   = open;
+          stockData[sym].high   = high;
+          stockData[sym].low    = low;
+          stockData[sym].volume = vol;
+          stockData[sym].chg    = chg;
+          stockData[sym].chgPct = +chgPct.toFixed(2);
+          successCount++;
+        }
+      } catch(e) {
+        // silently skip failed symbol, keep others going
+      }
+    }
+
+    const latency = Date.now() - t0;
+    document.getElementById('latency').textContent = latency + 'ms';
+    document.getElementById('last-update').textContent =
+      new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    if (successCount > 0) {
+      pollErrors = 0;
+      setConnStatus('live', 'LIVE — DNSE REST');
+      document.getElementById('status-source').textContent = 'DNSE API';
+      document.getElementById('overview-source').textContent = 'LIVE DATA';
+    } else {
+      pollErrors++;
+      if (pollErrors >= 3) {
+        setConnStatus('error', 'API ERROR — RETRYING');
+        // Fall back to simulation after 3 consecutive failures
+        console.warn('DNSE polling failed 3x, falling back to simulation');
+        clearInterval(pollTimer);
+        startPriceSimulation();
+        return;
+      }
+    }
+
+    // Refresh visible panels
+    renderWatchlist();
+    if (document.getElementById('panel-overview').classList.contains('active')) {
+      buildMarketGrid(); buildTicker();
+    }
+    if (document.getElementById('panel-portfolio').classList.contains('active')) {
+      renderPortfolio();
+    }
+  }
+
+  // Run immediately then every 3 seconds
+  await pollAll();
+  pollTimer = setInterval(pollAll, 3000);
+}
+
+// Also fetch real OHLC chart data from DNSE
+async function fetchRealChartData(symbol, resolution) {
   const token = Auth.get();
-  if (!token) { doLogout(); return; }
+  if (!token || isDemoMode) return null;
 
   try {
-    wsConnection = new WebSocket('wss://api.dnse.com.vn/quote-service/websocket');
+    const res = await fetch(`/api/chart?symbol=${symbol}&resolution=${resolution}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
 
-    wsConnection.onopen = () => {
-      setConnStatus('connecting', 'AUTHENTICATING');
-
-      // Authenticate
-      wsConnection.send(JSON.stringify({ action: 'auth', token }));
-
-      // Subscribe to all VN symbols
-      const symbols = VN_SYMBOLS.map(s => s.sym);
-      symbols.forEach(sym => {
-        wsConnection.send(JSON.stringify({
-          action: 'subscribe',
-          topic: `plaintext/quotes/stock/TP/${sym}`
-        }));
-      });
-
-      // Also subscribe to index
-      ['VNINDEX','HNX30','UPCOM'].forEach(idx => {
-        wsConnection.send(JSON.stringify({
-          action: 'subscribe',
-          topic: `plaintext/quotes/index/${idx}`
-        }));
-      });
-
-      setConnStatus('live', 'LIVE — DNSE');
-      document.getElementById('status-source').textContent = 'DNSE LIGHTSPEED';
-      document.getElementById('overview-source').textContent = 'LIVE DATA';
-    };
-
-    wsConnection.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        handleWsMessage(msg);
-        document.getElementById('latency').textContent =
-          Math.floor(Math.random() * 15 + 3) + 'ms';
-      } catch(e) {}
-    };
-
-    wsConnection.onerror = () => {
-      setConnStatus('error', 'WS ERROR — RETRYING');
-    };
-
-    wsConnection.onclose = () => {
-      setConnStatus('connecting', 'RECONNECTING');
-      wsReconnectTimer = setTimeout(connectWebSocket, 4000);
-    };
-
+    // DNSE returns: { bars: [{open,high,low,close,volume,time}] }
+    // or { t:[],o:[],h:[],l:[],c:[],v:[] } (TradingView format)
+    if (data.bars && Array.isArray(data.bars)) {
+      return data.bars.map(b => ({
+        o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume || 0
+      }));
+    }
+    if (data.t && Array.isArray(data.t)) {
+      return data.t.map((_, i) => ({
+        o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v?.[i] || 0
+      }));
+    }
+    if (Array.isArray(data)) {
+      return data.map(b => ({
+        o: b.open || b.o, h: b.high || b.h,
+        l: b.low  || b.l, c: b.close|| b.c, v: b.volume || b.v || 0
+      }));
+    }
+    return null;
   } catch(e) {
-    setConnStatus('error', 'CONNECT FAILED');
-    wsReconnectTimer = setTimeout(connectWebSocket, 5000);
+    return null;
   }
 }
 
-function handleWsMessage(msg) {
-  // DNSE message format: { id, sym, lastPrice, change, changePct, vol, ... }
-  const sym = msg.sym || msg.symbol || msg.id;
-  if (!sym || !stockData[sym]) return;
-
-  const price = msg.lastPrice || msg.matchedPrice || msg.price;
-  if (!price) return;
-
-  stockData[sym].price   = price;
-  stockData[sym].chg     = msg.change    || stockData[sym].chg;
-  stockData[sym].chgPct  = msg.changePct || stockData[sym].chgPct;
-  stockData[sym].volume  = msg.totalVol  || msg.vol || stockData[sym].volume;
-  stockData[sym].open    = msg.open      || stockData[sym].open;
-  stockData[sym].high    = msg.high      || stockData[sym].high;
-  stockData[sym].low     = msg.low       || stockData[sym].low;
-
-  // Update UI elements that are currently visible
-  renderWatchlist();
-  if (document.getElementById('panel-overview').classList.contains('active')) {
-    buildMarketGrid();
-    buildTicker();
-  }
-  if (document.getElementById('panel-portfolio').classList.contains('active')) {
-    renderPortfolio();
-  }
-
-  const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-  document.getElementById('last-update').textContent = now;
+// Legacy WebSocket stub — not used but kept for future upgrade
+function connectWebSocket() {
+  startRealtimePolling();
 }
 
 // Price simulation for demo mode
@@ -796,24 +833,39 @@ function genOHLC(n, base) {
   });
 }
 
-function initChart() {
+function initChart() { _initChart(); } // wrapper so callers don't need async
+
+async function _initChart() {
   const canvas  = document.getElementById('candleChart');
   const vCanvas = document.getElementById('volChart');
   if (!canvas) return;
 
   const sym   = document.getElementById('chart-sym').value;
   const d     = stockData[sym] || { price: 50000 };
-  const n     = tf==='1D'?48 : tf==='1W'?35 : tf==='1M'?30 : tf==='3M'?90 : 252;
-  const ohlc  = genOHLC(n, d.price * 0.92);
-  const last  = ohlc[ohlc.length-1];
+
+  // Map UI timeframe to DNSE resolution
+  const resMap = { '1D':'1', '1W':'D', '1M':'D', '3M':'D', '1Y':'W' };
+  const dnseRes = resMap[tf] || 'D';
+
+  // Try real DNSE data first, fall back to generated
+  let realData = await fetchRealChartData(sym, dnseRes);
+  if (realData && realData.length > 0) {
+    const maxBars = { '1D':390, '1W':5, '1M':22, '3M':66, '1Y':52 };
+    realData = realData.slice(-(maxBars[tf] || 252));
+  }
+
+  const n    = tf==='1D'?48 : tf==='1W'?35 : tf==='1M'?30 : tf==='3M'?90 : 252;
+  const ohlc = (realData && realData.length > 0) ? realData : genOHLC(n, d.price * 0.92);
+  const last = ohlc[ohlc.length-1];
 
   document.getElementById('chart-sym-label').textContent = sym;
-  document.getElementById('chart-live-badge').textContent = isDemoMode ? 'DEMO' : '● LIVE';
+  document.getElementById('chart-live-badge').textContent =
+    (!isDemoMode && realData) ? '● LIVE' : isDemoMode ? 'DEMO' : '~ EST';
   document.getElementById('ind-open').textContent  = fmtPrice(last.o);
   document.getElementById('ind-high').textContent  = fmtPrice(last.h);
   document.getElementById('ind-low').textContent   = fmtPrice(last.l);
   document.getElementById('ind-close').textContent = fmtPrice(d.price || last.c);
-  document.getElementById('ind-vol').textContent   = fmtK(last.v);
+  document.getElementById('ind-vol').textContent   = fmtK(last.v || 0);
 
   const closes = ohlc.map(c => c.c);
   const ma20   = closes.map((_,i) => i>=19 ? closes.slice(i-19,i+1).reduce((a,v)=>a+v,0)/20 : null);
