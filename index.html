@@ -527,94 +527,103 @@ function initDemoData() {
 // ══════════════════════════════════════════
 // WEBSOCKET — DNSE REALTIME
 // ══════════════════════════════════════════
-// ── REALTIME POLLING (REST every 3s) ─────────────────────────────────────
+// ── REALTIME POLLING (REST every 5s) ─────────────────────────────────────
 let pollTimer = null;
 let pollErrors = 0;
+let isPolling = false;
 
 async function startRealtimePolling() {
+  if (isPolling) return;
+  isPolling = true;
   setConnStatus('connecting', 'CONNECTING TO DNSE');
+
+  // First poll immediately, then repeat
+  await pollAll();
+  pollTimer = setInterval(pollAll, 5000);
+}
+
+async function pollAll() {
+  const token = Auth.get();
+  if (!token) { doLogout(); return; }
+
   const symbols = VN_SYMBOLS.map(s => s.sym);
+  let successCount = 0;
+  const t0 = Date.now();
 
-  // Fetch all symbols one by one, staggered to avoid rate limits
-  async function pollAll() {
-    const token = Auth.get();
-    if (!token) { doLogout(); return; }
-
-    let successCount = 0;
-    const t0 = Date.now();
-
-    for (const sym of symbols) {
+  // Fetch symbols in small batches of 3 to avoid overwhelming the API
+  for (let i = 0; i < symbols.length; i += 3) {
+    const batch = symbols.slice(i, i + 3);
+    await Promise.all(batch.map(async sym => {
       try {
         const res = await fetch(`/api/quote?symbol=${sym}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
 
         if (res.status === 401) { doLogout(); return; }
+        if (!res.ok) return;
 
         const raw = await res.json();
 
-        // DNSE quote response fields — try multiple possible structures
-        const price  = raw.lastPrice  || raw.matchedPrice || raw.close || raw.price;
-        const open   = raw.open       || raw.openPrice    || price;
-        const high   = raw.high       || raw.highPrice    || price;
-        const low    = raw.low        || raw.lowPrice     || price;
-        const vol    = raw.totalVolume|| raw.volume       || raw.vol   || 0;
-        const chg    = raw.change     || raw.priceChange  || (price - open) || 0;
-        const chgPct = raw.changePct  || raw.percentChange|| (open ? (chg/open)*100 : 0);
+        // Handle DNSE response — try all possible field names
+        const price = raw.lastPrice || raw.matchedPrice || raw.close
+                   || raw.closePrice || raw.price || raw.last;
 
-        if (price && stockData[sym]) {
+        if (price && price > 0 && stockData[sym]) {
+          const open   = raw.open    || raw.openPrice  || raw.referencePrice || price;
+          const high   = raw.high    || raw.highPrice  || price;
+          const low    = raw.low     || raw.lowPrice   || price;
+          const vol    = raw.totalVolume || raw.volume || raw.accumulatedVolume || 0;
+          const chg    = raw.change  || raw.priceChange || (price - open);
+          const chgPct = raw.changePct || raw.percentChange
+                      || (open > 0 ? ((price - open) / open * 100) : 0);
+
           stockData[sym].price  = price;
           stockData[sym].open   = open;
           stockData[sym].high   = high;
           stockData[sym].low    = low;
           stockData[sym].volume = vol;
-          stockData[sym].chg    = chg;
+          stockData[sym].chg    = +chg.toFixed(0);
           stockData[sym].chgPct = +chgPct.toFixed(2);
           successCount++;
         }
-      } catch(e) {
-        // silently skip failed symbol, keep others going
-      }
-    }
+      } catch(e) { /* skip failed symbol */ }
+    }));
+    // Small delay between batches
+    if (i + 3 < symbols.length) await new Promise(r => setTimeout(r, 200));
+  }
 
-    const latency = Date.now() - t0;
-    document.getElementById('latency').textContent = latency + 'ms';
-    document.getElementById('last-update').textContent =
-      new Date().toLocaleTimeString('en-US', { hour12: false });
+  const latency = Date.now() - t0;
+  document.getElementById('latency').textContent = latency + 'ms';
+  document.getElementById('last-update').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
 
-    if (successCount > 0) {
-      pollErrors = 0;
-      setConnStatus('live', 'LIVE — DNSE REST');
-      document.getElementById('status-source').textContent = 'DNSE API';
-      document.getElementById('overview-source').textContent = 'LIVE DATA';
+  if (successCount > 0) {
+    pollErrors = 0;
+    setConnStatus('live', 'LIVE — DNSE');
+    document.getElementById('status-source').textContent = 'DNSE API';
+    document.getElementById('overview-source').textContent = 'LIVE DATA';
+  } else {
+    pollErrors++;
+    console.warn(`Poll failed (${pollErrors}x) — token: ${token ? 'present' : 'missing'}`);
+    if (pollErrors < 5) {
+      setConnStatus('connecting', `RETRYING (${pollErrors}/5)`);
     } else {
-      pollErrors++;
-      if (pollErrors >= 3) {
-        setConnStatus('error', 'API ERROR — RETRYING');
-        // Fall back to simulation after 3 consecutive failures
-        console.warn('DNSE polling failed 3x, falling back to simulation');
-        clearInterval(pollTimer);
-        startPriceSimulation();
-        return;
-      }
-    }
-
-    // Refresh visible panels
-    renderWatchlist();
-    if (document.getElementById('panel-overview').classList.contains('active')) {
-      buildMarketGrid(); buildTicker();
-    }
-    if (document.getElementById('panel-portfolio').classList.contains('active')) {
-      renderPortfolio();
+      // After 5 failures keep trying but show error — don't fall back to fake data
+      setConnStatus('error', 'API ERROR — RETRYING');
     }
   }
 
-  // Run immediately then every 3 seconds
-  await pollAll();
-  pollTimer = setInterval(pollAll, 3000);
+  // Always refresh visible panels (even with demo/seed data)
+  renderWatchlist();
+  if (document.getElementById('panel-overview').classList.contains('active')) {
+    buildMarketGrid(); buildTicker();
+  }
+  if (document.getElementById('panel-portfolio').classList.contains('active')) {
+    renderPortfolio();
+  }
 }
 
-// Also fetch real OHLC chart data from DNSE
+// Fetch real OHLC chart data from DNSE
 async function fetchRealChartData(symbol, resolution) {
   const token = Auth.get();
   if (!token || isDemoMode) return null;
@@ -626,8 +635,7 @@ async function fetchRealChartData(symbol, resolution) {
     if (!res.ok) return null;
     const data = await res.json();
 
-    // DNSE returns: { bars: [{open,high,low,close,volume,time}] }
-    // or { t:[],o:[],h:[],l:[],c:[],v:[] } (TradingView format)
+    // Handle multiple DNSE response formats
     if (data.bars && Array.isArray(data.bars)) {
       return data.bars.map(b => ({
         o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume || 0
@@ -638,25 +646,23 @@ async function fetchRealChartData(symbol, resolution) {
         o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v?.[i] || 0
       }));
     }
-    if (Array.isArray(data)) {
+    if (Array.isArray(data) && data.length > 0) {
       return data.map(b => ({
         o: b.open || b.o, h: b.high || b.h,
         l: b.low  || b.l, c: b.close|| b.c, v: b.volume || b.v || 0
       }));
     }
     return null;
-  } catch(e) {
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
-// Legacy WebSocket stub — not used but kept for future upgrade
 function connectWebSocket() {
   startRealtimePolling();
 }
 
-// Price simulation for demo mode
+// Price simulation for demo mode ONLY
 function startPriceSimulation() {
+  if (!isDemoMode) return; // never simulate when logged in with real account
   setInterval(() => {
     Object.keys(stockData).forEach(sym => {
       const d = stockData[sym];
