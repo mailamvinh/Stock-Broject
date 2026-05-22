@@ -4,12 +4,14 @@
     { "src": "API/auth.js",  "use": "@vercel/node" },
     { "src": "API/quote.js", "use": "@vercel/node" },
     { "src": "API/chart.js", "use": "@vercel/node" },
+    { "src": "API/test.js",  "use": "@vercel/node" },
     { "src": "index.html",   "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/auth",        "dest": "/API/auth.js"  },
-    { "src": "/api/quote",       "dest": "/API/quote.js" },
-    { "src": "/api/chart",       "dest": "/API/chart.js" },
-    { "src": "/(.*)",            "dest": "/index.html"   }
+    { "src": "/api/auth",  "dest": "/API/auth.js"  },
+    { "src": "/api/quote", "dest": "/API/quote.js" },
+    { "src": "/api/chart", "dest": "/API/chart.js" },
+    { "src": "/api/test",  "dest": "/API/test.js"  },
+    { "src": "/(.*)",      "dest": "/index.html"   }
   ]
 }
