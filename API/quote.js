@@ -6,36 +6,42 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
   const { symbol } = req.query;
-  const token = req.headers['authorization'];
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.replace('Bearer ', '').trim();
 
-  if (!symbol) {
-    return res.status(400).json({ error: 'SYMBOL REQUIRED' });
-  }
-  if (!token) {
-    return res.status(401).json({ error: 'TOKEN REQUIRED' });
-  }
+  if (!symbol) return res.status(400).json({ error: 'SYMBOL REQUIRED' });
+  if (!token)  return res.status(401).json({ error: 'TOKEN REQUIRED' });
 
-  try {
-    // Try quote-ask-bid first (realtime bid/ask + last price)
-    const response = await fetch(
-      `https://api.dnse.com.vn/market-data-service/v2/securities/${symbol}/quote-ask-bid`,
-      {
+  // Try multiple DNSE endpoints in order
+  const endpoints = [
+    `https://api.dnse.com.vn/market-data-service/v2/securities/${symbol}/quote-ask-bid`,
+    `https://api.dnse.com.vn/market-data-service/v2/securities/${symbol}/quote`,
+    `https://api.dnse.com.vn/market-data-service/v1/securities/${symbol}/quote`,
+  ];
+
+  for (const url of endpoints) {
+    try {
+      console.log(`Trying: ${url}`);
+      const response = await fetch(url, {
         headers: {
-          'Authorization': token,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
         }
+      });
+
+      const text = await response.text();
+      console.log(`${symbol} → ${response.status}: ${text.slice(0, 300)}`);
+
+      if (response.ok) {
+        let data;
+        try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
+        return res.status(200).json(data);
       }
-    );
-
-    const text = await response.text();
-    let data;
-    try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
-
-    console.log(`Quote ${symbol} status:`, response.status);
-    return res.status(response.status).json(data);
-
-  } catch (err) {
-    console.log('Quote error:', err.message);
-    return res.status(500).json({ error: err.message });
+    } catch(e) {
+      console.log(`Failed ${url}:`, e.message);
+    }
   }
+
+  return res.status(503).json({ error: 'ALL_ENDPOINTS_FAILED', symbol });
 }
