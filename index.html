@@ -348,18 +348,46 @@ const Auth = (() => {
   let _expiresAt = null;
   let _username = null;
   return {
-    set(token, username, expiresIn = 3600) {
+    set(token, username, expiresIn = 28800) { // 8 hours = DNSE token lifetime
       _token = token;
       _username = username;
       _expiresAt = Date.now() + expiresIn * 1000;
+      // Persist to sessionStorage so refresh keeps you logged in
+      try {
+        sessionStorage.setItem('sb_token', token);
+        sessionStorage.setItem('sb_user', username);
+        sessionStorage.setItem('sb_exp', String(_expiresAt));
+      } catch(e) {}
     },
     get() {
-      if (!_token || Date.now() > _expiresAt) { _token = null; return null; }
-      return _token;
+      // Try memory first
+      if (_token && Date.now() < _expiresAt) return _token;
+      // Try sessionStorage (survives page refresh)
+      try {
+        const t = sessionStorage.getItem('sb_token');
+        const u = sessionStorage.getItem('sb_user');
+        const e = parseInt(sessionStorage.getItem('sb_exp') || '0');
+        if (t && Date.now() < e) {
+          _token = t; _username = u; _expiresAt = e;
+          return _token;
+        }
+      } catch(e) {}
+      _token = null;
+      return null;
     },
-    getUser() { return _username; },
+    getUser() {
+      if (_username) return _username;
+      try { return sessionStorage.getItem('sb_user') || '--'; } catch(e) { return '--'; }
+    },
     isLoggedIn() { return !!this.get(); },
-    clear() { _token = null; _expiresAt = null; _username = null; }
+    clear() {
+      _token = null; _expiresAt = null; _username = null;
+      try {
+        sessionStorage.removeItem('sb_token');
+        sessionStorage.removeItem('sb_user');
+        sessionStorage.removeItem('sb_exp');
+      } catch(e) {}
+    }
   };
 })();
 
@@ -367,9 +395,10 @@ const Auth = (() => {
 // STATE
 // ══════════════════════════════════════════
 let isDemoMode = false;
-let wsConnection = null;
-let wsReconnectTimer = null;
-let stockData = {};        // live prices keyed by symbol
+let pollTimer = null;
+let pollErrors = 0;
+let isPolling = false;
+let stockData = {};
 let watchlist = ['VCB','TCB','VIC','HPG','VNM'];
 let tf = '1D';
 let activeIndicators = { ma: false, bb: false };
@@ -461,8 +490,8 @@ function demoMode() {
 }
 
 function doLogout() {
-  if (wsConnection) { wsConnection.close(); wsConnection = null; }
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  isPolling = false;
   Auth.clear();
   stockData = {};
   document.getElementById('main-app').classList.remove('visible');
@@ -1020,6 +1049,15 @@ document.addEventListener('keydown', e => {
     doLogin();
   }
 });
+
+// Auto-restore session on page load — skip login if token still valid
+(function checkAutoRestore() {
+  if (Auth.isLoggedIn() && Auth.getUser() !== 'DEMO_USER') {
+    isDemoMode = false;
+    document.getElementById('login-screen').style.display = 'none';
+    launchApp();
+  }
+})();
 </script>
 </body>
 </html>
