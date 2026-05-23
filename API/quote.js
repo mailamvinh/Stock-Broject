@@ -2,38 +2,33 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
   const { symbol } = req.query;
-  const authHeader = req.headers['authorization'] || '';
-  const token = authHeader.replace('Bearer ', '').trim();
-
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
   if (!symbol) return res.status(400).json({ error: 'SYMBOL REQUIRED' });
   if (!token)  return res.status(401).json({ error: 'TOKEN REQUIRED' });
 
-  // Try multiple DNSE endpoints in order
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  };
+
+  // Try correct DNSE/entrade endpoints in order
   const endpoints = [
-    `https://api.dnse.com.vn/market-data-service/v2/securities/${symbol}/quote-ask-bid`,
+    `https://services.entrade.com.vn/dnse-price-service/securities/${symbol}`,
+    `https://services.entrade.com.vn/dnse-market-data-service/v2/securities/${symbol}/quote`,
     `https://api.dnse.com.vn/market-data-service/v2/securities/${symbol}/quote`,
-    `https://api.dnse.com.vn/market-data-service/v1/securities/${symbol}/quote`,
+    `https://api.dnse.com.vn/quote-service/v2/securities/${symbol}`,
   ];
 
   for (const url of endpoints) {
     try {
-      console.log(`Trying: ${url}`);
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        }
-      });
-
-      const text = await response.text();
-      console.log(`${symbol} → ${response.status}: ${text.slice(0, 300)}`);
-
-      if (response.ok) {
+      const r = await fetch(url, { headers });
+      const text = await r.text();
+      console.log(`${symbol} ${url} → ${r.status}: ${text.slice(0,200)}`);
+      if (r.ok) {
         let data;
         try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
         return res.status(200).json(data);
